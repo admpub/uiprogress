@@ -62,7 +62,8 @@ type Bar struct {
 	// timeElased is the time elapsed for the progress
 	timeElapsed time.Duration
 	current     int
-	mtx         sync.RWMutex
+
+	mtx *sync.RWMutex
 
 	appendFuncs  []DecoratorFunc
 	prependFuncs []DecoratorFunc
@@ -81,45 +82,57 @@ func NewBar(total int) *Bar {
 		Head:     Head,
 		Fill:     Fill,
 		Empty:    Empty,
+
+		mtx: &sync.RWMutex{},
 	}
 }
 
-// Sets the current count of the bar. It returns ErrMaxCurrentReached when trying n exceeds the total value. This is non atomic operation and not concurancy safe.
+// Set the current count of the bar. It returns ErrMaxCurrentReached when trying n exceeds the total value. This is atomic operation and concurancy safe.
 func (b *Bar) Set(n int) error {
+	b.mtx.Lock()
+	defer b.mtx.Unlock()
+
 	if n > b.Total {
 		return ErrMaxCurrentReached
 	}
-
-	if b.current == 0 {
-		b.TimeStarted = time.Now()
-	}
-	b.timeElapsed = time.Since(b.TimeStarted)
 	b.current = n
 	return nil
 }
 
-// Incr increments the current value by 1 and returns true. It returns false if the cursor has reached or exceeds total value. This is atomic operation and concurancy safe.
+// Incr increments the current value by 1, time elapsed to current time and returns true. It returns false if the cursor has reached or exceeds total value.
 func (b *Bar) Incr() bool {
 	b.mtx.Lock()
 	defer b.mtx.Unlock()
-	if err := b.Set(b.current + 1); err == ErrMaxCurrentReached {
+
+	n := b.current + 1
+	if n > b.Total {
 		return false
 	}
+	var t time.Time
+	if b.TimeStarted == t {
+		b.TimeStarted = time.Now()
+	}
+	b.timeElapsed = time.Since(b.TimeStarted)
+	b.current = n
 	return true
 }
 
 // Current returns the current progress of the bar
 func (b *Bar) Current() int {
+	b.mtx.RLock()
+	defer b.mtx.RUnlock()
 	return b.current
 }
 
-// AppendFunc appends a decorator function that will be rendered on before the progress bar
+// AppendFunc runs the decorator function and renders the output on the right of the progress bar
 func (b *Bar) AppendFunc(f DecoratorFunc) *Bar {
+	b.mtx.Lock()
+	defer b.mtx.Unlock()
 	b.appendFuncs = append(b.appendFuncs, f)
 	return b
 }
 
-// AppendCompleted will append completion percent to the progress bar
+// AppendCompleted appends the completion percent to the progress bar
 func (b *Bar) AppendCompleted() *Bar {
 	b.AppendFunc(func(b *Bar) string {
 		return b.CompletedPercentString()
@@ -127,7 +140,7 @@ func (b *Bar) AppendCompleted() *Bar {
 	return b
 }
 
-// AppendElapsed with append the time elapsed the be progress bar
+// AppendElapsed appends the time elapsed the be progress bar
 func (b *Bar) AppendElapsed() *Bar {
 	b.AppendFunc(func(b *Bar) string {
 		return strutil.PadLeft(b.TimeElapsedString(), 5, ' ')
@@ -135,8 +148,10 @@ func (b *Bar) AppendElapsed() *Bar {
 	return b
 }
 
-// PrependFunc appends a decorator function that will be rendered on after the progress bar
+// PrependFunc runs decorator function and render the output left the progress bar
 func (b *Bar) PrependFunc(f DecoratorFunc) *Bar {
+	b.mtx.Lock()
+	defer b.mtx.Unlock()
 	b.prependFuncs = append(b.prependFuncs, f)
 	return b
 }
@@ -159,8 +174,7 @@ func (b *Bar) PrependElapsed() *Bar {
 
 // Bytes returns the byte presentation of the progress bar
 func (b *Bar) Bytes() []byte {
-	completedWidthF := float64(b.Width) * (b.CompletedPercent() / 100.00)
-	completedWidth := int(completedWidthF)
+	completedWidth := int(float64(b.Width) * (b.CompletedPercent() / 100.00))
 
 	// add fill and empty bits
 	var buf bytes.Buffer
@@ -202,7 +216,7 @@ func (b *Bar) String() string {
 
 // CompletedPercent return the percent completed
 func (b *Bar) CompletedPercent() float64 {
-	return (float64(b.current) / float64(b.Total)) * 100.00
+	return (float64(b.Current()) / float64(b.Total)) * 100.00
 }
 
 // CompletedPercentString returns the formatted string representation of the completed percent
@@ -212,6 +226,8 @@ func (b *Bar) CompletedPercentString() string {
 
 // TimeElapsed returns the time elapsed
 func (b *Bar) TimeElapsed() time.Duration {
+	b.mtx.RLock()
+	defer b.mtx.RUnlock()
 	return b.timeElapsed
 }
 

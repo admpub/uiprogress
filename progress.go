@@ -4,19 +4,20 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/gosuri/uilive"
 )
 
-var (
-	// Out is the default writer to render progress bars to
-	Out = os.Stdout
-	// DefaultProgress is the default progress
-	DefaultProgress = New()
-	// RefreshInterval in the default time duration to wait for refreshing the output
-	RefreshInterval = time.Millisecond
-)
+// Out is the default writer to render progress bars to
+var Out = os.Stdout
+
+// RefreshInterval in the default time duration to wait for refreshing the output
+var RefreshInterval = time.Millisecond * 10
+
+// defaultProgress is the default progress
+var defaultProgress = New()
 
 // Progress represents the container that renders progress bars
 type Progress struct {
@@ -32,9 +33,9 @@ type Progress struct {
 	// RefreshInterval in the time duration to wait for refreshing the output
 	RefreshInterval time.Duration
 
-	lw *uilive.Writer
-
+	lw       *uilive.Writer
 	stopChan chan struct{}
+	mtx      *sync.RWMutex
 }
 
 // New returns a new progress bar with defaults
@@ -47,31 +48,35 @@ func New() *Progress {
 
 		lw:       uilive.New(),
 		stopChan: make(chan struct{}),
+		mtx:      &sync.RWMutex{},
 	}
 }
 
 // AddBar creates a new progress bar and adds it to the default progress container
 func AddBar(total int) *Bar {
-	return DefaultProgress.AddBar(total)
+	return defaultProgress.AddBar(total)
 }
 
 // Start starts the rendering the progress of progress bars using the DefaultProgress. It listens for updates using `bar.Set(n)` and new bars when added using `AddBar`
 func Start() {
-	DefaultProgress.Start()
+	defaultProgress.Start()
 }
 
 // Stop stops listening
 func Stop() {
-	DefaultProgress.Stop()
+	defaultProgress.Stop()
 }
 
 // Listen listens for updates and renders the progress bars
 func Listen() {
-	DefaultProgress.Listen()
+	defaultProgress.Listen()
 }
 
 // AddBar creates a new progress bar and adds to the container
 func (p *Progress) AddBar(total int) *Bar {
+	p.mtx.Lock()
+	defer p.mtx.Unlock()
+
 	bar := NewBar(total)
 	bar.Width = p.Width
 	p.Bars = append(p.Bars, bar)
@@ -81,24 +86,37 @@ func (p *Progress) AddBar(total int) *Bar {
 // Listen listens for updates and renders the progress bars
 func (p *Progress) Listen() {
 	p.lw.Out = p.Out
-	go func() {
-		for {
+	for {
+		select {
+		case <-p.stopChan:
+			return
+		default:
+			time.Sleep(p.RefreshInterval)
+			p.mtx.RLock()
 			for _, bar := range p.Bars {
 				fmt.Fprintln(p.lw, bar.String())
 			}
 			p.lw.Flush()
-			time.Sleep(p.RefreshInterval)
+			p.mtx.RUnlock()
 		}
-	}()
-	<-p.stopChan
+	}
 }
 
 // Start starts the rendering the progress of progress bars. It listens for updates using `bar.Set(n)` and new bars when added using `AddBar`
 func (p *Progress) Start() {
+	if p.stopChan == nil {
+		p.stopChan = make(chan struct{})
+	}
 	go p.Listen()
 }
 
 // Stop stops listening
 func (p *Progress) Stop() {
-	p.stopChan <- struct{}{}
+	close(p.stopChan)
+	p.stopChan = nil
+}
+
+// Bypass returns a writer which allows non-buffered data to be written to the underlying output
+func (p *Progress) Bypass() io.Writer {
+	return p.lw.Bypass()
 }
